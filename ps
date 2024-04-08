@@ -1,0 +1,26 @@
+$vmlist = Get-AzVM | Where-Object { $_.Tags['developer'] }
+
+
+
+
+foreach ($vm in $vmlist) {
+    $status = (Get-AzVM -ResourceGroupName $vm.ResourceGroupName -Name $vm.Name -Status).Statuses | Where-Object { $_.Code -match 'PowerState/' } | Select-Object -ExpandProperty Code
+
+    if ($status -eq 'PowerState/running') {
+        Write-Output "Stopping VM $($vm.Name) because it is currently running."
+        Stop-AzVM -Name $vm.Name -ResourceGroupName $vm.ResourceGroupName -Force -AsJob
+    }
+    elseif ($status -eq 'PowerState/deallocated' -or $status -eq 'PowerState/stopped') {
+        Write-Output "Starting VM $($vm.Name) because it is currently stopped."
+        Start-AzVM -Name $vm.Name -ResourceGroupName $vm.ResourceGroupName -AsJob
+    }
+    else {
+        Write-Output "VM $($vm.Name) is in an unexpected state: $status"
+    }
+
+    # Wait for all jobs to complete after each operation to ensure sequential execution
+    Get-Job | Wait-Job | Out-Null
+    Get-Job | Remove-Job
+}
+
+Write-Output "Operation completed on all VMs."
