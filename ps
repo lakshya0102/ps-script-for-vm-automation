@@ -1,26 +1,45 @@
+param (
+    [string]$Tag = "developer",
+    [switch]$Start,
+    [switch]$Stop
+)
+
+if (-not ($Start -or $Stop)) {
+    Write-Output "Please specify either -Start or -Stop switch."
+    return
+}
+
 $vmlist = Get-AzVM | Where-Object { $_.Tags['developer'] }
 
+$runspacePool = [runspacefactory]::CreateRunspacePool(1, 50)  
+$runspacePool.Open()
 
-
+$runspaces = @()
 
 foreach ($vm in $vmlist) {
-    $status = (Get-AzVM -ResourceGroupName $vm.ResourceGroupName -Name $vm.Name -Status).Statuses | Where-Object { $_.Code -match 'PowerState/' } | Select-Object -ExpandProperty Code
-
-    if ($status -eq 'PowerState/running') {
-        Write-Output "Stopping VM $($vm.Name) because it is currently running."
-        Stop-AzVM -Name $vm.Name -ResourceGroupName $vm.ResourceGroupName -Force -AsJob
-    }
-    elseif ($status -eq 'PowerState/deallocated' -or $status -eq 'PowerState/stopped') {
-        Write-Output "Starting VM $($vm.Name) because it is currently stopped."
-        Start-AzVM -Name $vm.Name -ResourceGroupName $vm.ResourceGroupName -AsJob
-    }
-    else {
-        Write-Output "VM $($vm.Name) is in an unexpected state: $status"
-    }
-
-    # Wait for all jobs to complete after each operation to ensure sequential execution
-    Get-Job | Wait-Job | Out-Null
-    Get-Job | Remove-Job
+    $runspace = [powershell]::Create().AddScript({
+        param($vm, $Start, $Stop)
+        $status = (Get-AzVM -ResourceGroupName $vm.ResourceGroupName -Name $vm.Name -Status).Statuses | Where-Object { $_.Code -match 'PowerState/' } | Select-Object -ExpandProperty Code
+        
+        if ($Stop -and $status -eq 'PowerState/running') {
+            Stop-AzVM -Name $vm.Name -ResourceGroupName $vm.ResourceGroupName -Force -AsJob | Wait-Job | Out-Null
+            "Stopped VM $($vm.Name)"
+        }
+        elseif ($Start -and ($status -eq 'PowerState/deallocated' -or $status -eq 'PowerState/stopped')) {
+            Start-AzVM -Name $vm.Name -ResourceGroupName $vm.ResourceGroupName -AsJob | Wait-Job | Out-Null
+            "Started VM $($vm.Name)"
+        }
+    }).AddParameters(@{vm=$vm; Start=$Start; Stop=$Stop}).BeginInvoke()
+    $runspaces += @{Pipeline=$runspace; VMName=$vm.Name}
 }
+
+foreach ($runspace in $runspaces) {
+    $runspace.Pipeline.EndInvoke($runspace.Pipeline)
+    $runspace.Pipeline.Dispose()
+    Write-Output "finished operation for $($runspace.VMName)"
+}
+
+$runspacePool.Close()
+$runspacePool.Dispose()
 
 Write-Output "Operation completed on all VMs."
